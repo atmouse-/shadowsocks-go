@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
@@ -16,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	ss "github.com/atmouse-/shadowsocks-go/shadowsocks"
 )
@@ -107,7 +110,7 @@ const logCntDelta = 100
 var connCnt int
 var nextLogConnCnt int = logCntDelta
 
-func handleConnection(conn *ss.Conn, auth bool) {
+func handleConnection(conn *ss.Conn, auth bool, out chan<- bool) {
 	var host string
 
 	connCnt++ // this maybe not accurate, but should be enough
@@ -119,6 +122,7 @@ func handleConnection(conn *ss.Conn, auth bool) {
 		nextLogConnCnt += logCntDelta
 	}
 
+	out <- true
 	// function arguments are always evaluated, so surround debug statement
 	// with if statement
 	if debug {
@@ -173,6 +177,7 @@ func handleConnection(conn *ss.Conn, auth bool) {
 type PortListener struct {
 	password string
 	listener net.Listener
+	lastconnection int64
 }
 
 type PasswdManager struct {
@@ -182,7 +187,7 @@ type PasswdManager struct {
 
 func (pm *PasswdManager) add(port, password string, listener net.Listener) {
 	pm.Lock()
-	pm.portListener[port] = &PortListener{password, listener}
+	pm.portListener[port] = &PortListener{password, listener, time.Now().Unix()}
 	pm.Unlock()
 }
 
@@ -202,6 +207,30 @@ func (pm *PasswdManager) del(port string) {
 	pm.Lock()
 	delete(pm.portListener, port)
 	pm.Unlock()
+}
+
+func (pm *PasswdManager) touch(port string) {
+	pm.Lock()
+	pm.portListener[port].lastconnection = time.Now().Unix()
+	pm.Unlock()
+}
+
+func (pm *PasswdManager) status_to_json() (ret string) {
+	// [{"port": 16000, "last_connection": 156982953}]
+	var pl map[string]interface{}
+	var outer []map[string]interface{}
+	pm.Lock()
+	for port, p := range pm.portListener {
+		pl = make(map[string]interface{})
+		pl["port"], _ = strconv.ParseInt(port, 10, 64)
+		pl["lastconnection"] = p.lastconnection
+		outer = append(outer, pl)
+	}
+	pm.Unlock()
+	data, _ := json.Marshal(outer)
+
+	ret = string(data)
+	return
 }
 
 // Update port password would first close a port and restart listening on that
@@ -225,6 +254,13 @@ func (pm *PasswdManager) updatePortPasswd(port, password string, auth bool) {
 }
 
 var passwdManager = PasswdManager{portListener: map[string]*PortListener{}}
+
+func connection_capacitor(port string, in <-chan bool) {
+	for {
+		<- in
+		passwdManager.touch(port)
+	}
+}
 
 func updatePasswd() {
 	log.Println("updating password")
@@ -276,6 +312,8 @@ func run(port, password string, auth bool) {
 	passwdManager.add(port, password, ln)
 	var cipher *ss.Cipher
 	log.Printf("server listening port %v ...\n", port)
+	bell := make(chan bool)
+	go connection_capacitor(port, bell)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -293,7 +331,7 @@ func run(port, password string, auth bool) {
 				continue
 			}
 		}
-		go handleConnection(ss.NewConn(conn, cipher.Copy()), auth)
+		go handleConnection(ss.NewConn(conn, cipher.Copy()), auth, bell)
 	}
 }
 
@@ -320,6 +358,18 @@ func unifyPortPassword(config *ss.Config) (err error) {
 var configFile string
 var config *ss.Config
 
+func StatusServer(w http.ResponseWriter, req *http.Request) {
+	fmt.Fprintf(w, passwdManager.status_to_json())
+}
+
+func status_httpworker() {
+	// password manager status
+	http.HandleFunc("/pwstatus", StatusServer)
+	_err := http.ListenAndServe("localhost:3001", nil)
+	if _err != nil {
+		log.Fatal("ListenAndServe: ", _err.Error())
+	}
+}
 func main() {
 	log.SetOutput(os.Stdout)
 
@@ -377,6 +427,8 @@ func main() {
 	for port, password := range config.PortPassword {
 		go run(port, password, config.Auth)
 	}
+
+	go status_httpworker()
 
 	waitSignal()
 }
