@@ -109,8 +109,9 @@ const logCntDelta = 100
 
 var connCnt int
 var nextLogConnCnt int = logCntDelta
+var lastConnectionTime map[string]int64
 
-func handleConnection(conn *ss.Conn, auth bool, out chan<- bool) {
+func handleConnection(conn *ss.Conn, auth bool) {
 	var host string
 
 	connCnt++ // this maybe not accurate, but should be enough
@@ -122,7 +123,8 @@ func handleConnection(conn *ss.Conn, auth bool, out chan<- bool) {
 		nextLogConnCnt += logCntDelta
 	}
 
-	out <- true
+	// update the last connection time.
+
 	// function arguments are always evaluated, so surround debug statement
 	// with if statement
 	if debug {
@@ -177,7 +179,6 @@ func handleConnection(conn *ss.Conn, auth bool, out chan<- bool) {
 type PortListener struct {
 	password string
 	listener net.Listener
-	lastconnection int64
 }
 
 type PasswdManager struct {
@@ -185,9 +186,14 @@ type PasswdManager struct {
 	portListener map[string]*PortListener
 }
 
+// func (pm *PasswdManager) add(port, password string, listener net.Listener) {
+// 	pm.Lock()
+// 	pm.portListener[port] = &PortListener{password, listener}
+// 	pm.Unlock()
+// }
 func (pm *PasswdManager) add(port, password string, listener net.Listener) {
 	pm.Lock()
-	pm.portListener[port] = &PortListener{password, listener, time.Now().Unix()}
+	pm.portListener[port] = &PortListener{password, listener}
 	pm.Unlock()
 }
 
@@ -207,30 +213,6 @@ func (pm *PasswdManager) del(port string) {
 	pm.Lock()
 	delete(pm.portListener, port)
 	pm.Unlock()
-}
-
-func (pm *PasswdManager) touch(port string) {
-	pm.Lock()
-	pm.portListener[port].lastconnection = time.Now().Unix()
-	pm.Unlock()
-}
-
-func (pm *PasswdManager) status_to_json() (ret string) {
-	// [{"port": 16000, "last_connection": 156982953}]
-	var pl map[string]interface{}
-	var outer []map[string]interface{}
-	pm.Lock()
-	for port, p := range pm.portListener {
-		pl = make(map[string]interface{})
-		pl["port"], _ = strconv.ParseInt(port, 10, 64)
-		pl["lastconnection"] = p.lastconnection
-		outer = append(outer, pl)
-	}
-	pm.Unlock()
-	data, _ := json.Marshal(outer)
-
-	ret = string(data)
-	return
 }
 
 // Update port password would first close a port and restart listening on that
@@ -254,13 +236,6 @@ func (pm *PasswdManager) updatePortPasswd(port, password string, auth bool) {
 }
 
 var passwdManager = PasswdManager{portListener: map[string]*PortListener{}}
-
-func connection_capacitor(port string, in <-chan bool) {
-	for {
-		<- in
-		passwdManager.touch(port)
-	}
-}
 
 func updatePasswd() {
 	log.Println("updating password")
@@ -312,8 +287,7 @@ func run(port, password string, auth bool) {
 	passwdManager.add(port, password, ln)
 	var cipher *ss.Cipher
 	log.Printf("server listening port %v ...\n", port)
-	bell := make(chan bool)
-	go connection_capacitor(port, bell)
+
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -331,7 +305,9 @@ func run(port, password string, auth bool) {
 				continue
 			}
 		}
-		go handleConnection(ss.NewConn(conn, cipher.Copy()), auth, bell)
+
+		go handleConnection(ss.NewConn(conn, cipher.Copy()), auth)
+		lastConnectionTime[port] = time.Now().Unix()
 	}
 }
 
@@ -355,21 +331,43 @@ func unifyPortPassword(config *ss.Config) (err error) {
 	return
 }
 
-var configFile string
-var config *ss.Config
-
-func StatusServer(w http.ResponseWriter, req *http.Request) {
-	fmt.Fprintf(w, passwdManager.status_to_json())
+type portTime struct {
+	Port           int   `json:"port"`
+	LastConnection int64 `json:"last_connection"`
 }
 
-func status_httpworker() {
+func statusServer(w http.ResponseWriter, req *http.Request) {
+	var tmpArray []portTime
+	var ret []byte
+	for k, v := range lastConnectionTime {
+		var tmpPortTime portTime
+		tmpPort, err := strconv.Atoi(k)
+		if err != nil || tmpPort == 0 {
+			continue
+		}
+		tmpPortTime.Port = tmpPort
+		tmpPortTime.LastConnection = v
+		tmpArray = append(tmpArray, tmpPortTime)
+	}
+	ret, err := json.Marshal(tmpArray)
+	if err != nil {
+		ret = []byte("[]")
+	}
+	fmt.Fprintf(w, string(ret))
+}
+
+func statusHTTPWorker() {
 	// password manager status
-	http.HandleFunc("/pwstatus", StatusServer)
+	http.HandleFunc("/pwstatus", statusServer)
 	_err := http.ListenAndServe("localhost:3001", nil)
 	if _err != nil {
 		log.Fatal("ListenAndServe: ", _err.Error())
 	}
 }
+
+var configFile string
+var config *ss.Config
+
 func main() {
 	log.SetOutput(os.Stdout)
 
@@ -400,6 +398,9 @@ func main() {
 		cmdConfig.Auth = true
 	}
 
+	// init lastConnectionTime
+	lastConnectionTime = make(map[string]int64)
+
 	var err error
 	config, err = ss.ParseConfig(configFile)
 	if err != nil {
@@ -428,7 +429,7 @@ func main() {
 		go run(port, password, config.Auth)
 	}
 
-	go status_httpworker()
+	go statusHTTPWorker()
 
 	waitSignal()
 }
