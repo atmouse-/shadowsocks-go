@@ -350,10 +350,10 @@ func statusServer(w http.ResponseWriter, req *http.Request) {
 		tmpArray = append(tmpArray, tmpPortTime)
 	}
 	ret, err := json.Marshal(tmpArray)
-	if err != nil {
+	if err != nil || string(ret) == "null" {
 		ret = []byte("[]")
 	}
-	fmt.Fprintf(w, string(ret))
+	fmt.Fprintln(w, string(ret))
 }
 
 func statusHTTPWorker() {
