@@ -186,11 +186,6 @@ type PasswdManager struct {
 	portListener map[string]*PortListener
 }
 
-// func (pm *PasswdManager) add(port, password string, listener net.Listener) {
-// 	pm.Lock()
-// 	pm.portListener[port] = &PortListener{password, listener}
-// 	pm.Unlock()
-// }
 func (pm *PasswdManager) add(port, password string, listener net.Listener) {
 	pm.Lock()
 	pm.portListener[port] = &PortListener{password, listener}
