@@ -328,7 +328,7 @@ func unifyPortPassword(config *ss.Config) (err error) {
 
 type portTime struct {
 	Port           int   `json:"port"`
-	LastConnection int64 `json:"last_connection"`
+	LastConnection int64 `json:"lastconnection"`
 }
 
 func statusServer(w http.ResponseWriter, req *http.Request) {
