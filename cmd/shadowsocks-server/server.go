@@ -109,7 +109,10 @@ const logCntDelta = 100
 
 var connCnt int
 var nextLogConnCnt int = logCntDelta
-var lastConnectionTime map[string]int64
+var lastConnectionMutex = struct{
+    sync.RWMutex
+    mtime map[string]int64
+}{mtime: make(map[string]int64)}
 
 func handleConnection(conn *ss.Conn, auth bool) {
 	var host string
@@ -302,7 +305,9 @@ func run(port, password string, auth bool) {
 		}
 
 		go handleConnection(ss.NewConn(conn, cipher.Copy()), auth)
-		lastConnectionTime[port] = time.Now().Unix()
+		lastConnectionMutex.Lock()
+		lastConnectionMutex.mtime[port] = time.Now().Unix()
+		lastConnectionMutex.Unlock()
 	}
 }
 
@@ -334,7 +339,8 @@ type portTime struct {
 func statusServer(w http.ResponseWriter, req *http.Request) {
 	var tmpArray []portTime
 	var ret []byte
-	for k, v := range lastConnectionTime {
+	lastConnectionMutex.RLock()
+	for k, v := range lastConnectionMutex.mtime {
 		var tmpPortTime portTime
 		tmpPort, err := strconv.Atoi(k)
 		if err != nil || tmpPort == 0 {
@@ -344,6 +350,7 @@ func statusServer(w http.ResponseWriter, req *http.Request) {
 		tmpPortTime.LastConnection = v
 		tmpArray = append(tmpArray, tmpPortTime)
 	}
+	lastConnectionMutex.RUnlock()
 	ret, err := json.Marshal(tmpArray)
 	if err != nil || string(ret) == "null" {
 		ret = []byte("[]")
@@ -392,9 +399,6 @@ func main() {
 		cmdConfig.Method = cmdConfig.Method[:len(cmdConfig.Method)-4]
 		cmdConfig.Auth = true
 	}
-
-	// init lastConnectionTime
-	lastConnectionTime = make(map[string]int64)
 
 	var err error
 	config, err = ss.ParseConfig(configFile)
