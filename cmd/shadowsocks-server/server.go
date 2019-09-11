@@ -228,9 +228,17 @@ func (pm *PasswdManager) updatePortPasswd(port, password string, auth bool) {
 		log.Printf("closing port %s to update password\n", port)
 		pl.listener.Close()
 	}
+
+	ln, err := net.Listen("tcp", ":"+port)
+	if err != nil {
+		log.Printf("error listening port %v: %v\n", port, err)
+		os.Exit(1)
+	}
+	passwdManager.add(port, password, ln)
+
 	// run will add the new port listener to passwdManager.
 	// So there maybe concurrent access to passwdManager and we need lock to protect it.
-	go run(port, password, auth)
+	go run(ln, port, password, auth)
 }
 
 var passwdManager = PasswdManager{portListener: map[string]*PortListener{}}
@@ -276,13 +284,7 @@ func waitSignal() {
 	}
 }
 
-func run(port, password string, auth bool) {
-	ln, err := net.Listen("tcp", ":"+port)
-	if err != nil {
-		log.Printf("error listening port %v: %v\n", port, err)
-		os.Exit(1)
-	}
-	passwdManager.add(port, password, ln)
+func run(ln net.Listener, port, password string, auth bool) {
 	var cipher *ss.Cipher
 	log.Printf("server listening port %v ...\n", port)
 
@@ -425,7 +427,13 @@ func main() {
 		runtime.GOMAXPROCS(core)
 	}
 	for port, password := range config.PortPassword {
-		go run(port, password, config.Auth)
+		ln, err := net.Listen("tcp", ":"+port)
+		if err != nil {
+			log.Printf("error listening port %v: %v\n", port, err)
+			os.Exit(1)
+		}
+		passwdManager.add(port, password, ln)
+		go run(ln, port, password, config.Auth)
 	}
 
 	go statusHTTPWorker()
