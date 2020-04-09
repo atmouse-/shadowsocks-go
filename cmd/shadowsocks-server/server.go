@@ -109,9 +109,9 @@ const logCntDelta = 100
 
 var connCnt int
 var nextLogConnCnt int = logCntDelta
-var lastConnectionMutex = struct{
-    sync.RWMutex
-    mtime map[string]int64
+var lastConnectionMutex = struct {
+	sync.RWMutex
+	mtime map[string]int64
 }{mtime: make(map[string]int64)}
 
 func handleConnection(conn *ss.Conn, auth bool) {
@@ -193,6 +193,9 @@ func (pm *PasswdManager) add(port, password string, listener net.Listener) {
 	pm.Lock()
 	pm.portListener[port] = &PortListener{password, listener}
 	pm.Unlock()
+	lastConnectionMutex.Lock()
+	lastConnectionMutex.mtime[port] = time.Now().Unix()
+	lastConnectionMutex.Unlock()
 }
 
 func (pm *PasswdManager) get(port string) (pl *PortListener, ok bool) {
@@ -211,6 +214,9 @@ func (pm *PasswdManager) del(port string) {
 	pm.Lock()
 	delete(pm.portListener, port)
 	pm.Unlock()
+	lastConnectionMutex.Lock()
+	delete(lastConnectionMutex.mtime, port)
+	lastConnectionMutex.Unlock()
 }
 
 // Update port password would first close a port and restart listening on that
