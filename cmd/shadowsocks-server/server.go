@@ -111,10 +111,16 @@ var connCnt int
 var nextLogConnCnt int = logCntDelta
 var lastConnectionMutex = struct {
 	sync.RWMutex
-	mtime map[string]int64
-}{mtime: make(map[string]int64)}
+	mtime         map[string]int64
+	flowUpStats   map[string]int64
+	flowDownStats map[string]int64
+}{
+	mtime:         make(map[string]int64),
+	flowUpStats:   make(map[string]int64),
+	flowDownStats: make(map[string]int64),
+}
 
-func handleConnection(conn *ss.Conn, auth bool) {
+func handleConnection(conn *ss.Conn, auth bool, port string) {
 	var host string
 
 	connCnt++ // this maybe not accurate, but should be enough
@@ -170,11 +176,25 @@ func handleConnection(conn *ss.Conn, auth bool) {
 		debug.Printf("piping %s<->%s ota=%v connOta=%v", conn.RemoteAddr(), host, ota, conn.IsOta())
 	}
 	if ota {
-		go ss.PipeThenCloseOta(conn, remote)
+		go func() {
+			flow := ss.PipeThenCloseOta(conn, remote)
+			lastConnectionMutex.Lock()
+			lastConnectionMutex.flowUpStats[port] = lastConnectionMutex.flowUpStats[port] + int64(flow)
+			lastConnectionMutex.Unlock()
+		}()
 	} else {
-		go ss.PipeThenClose(conn, remote)
+		go func() {
+			flow := ss.PipeThenClose(conn, remote)
+			lastConnectionMutex.Lock()
+			lastConnectionMutex.flowUpStats[port] = lastConnectionMutex.flowUpStats[port] + int64(flow)
+			lastConnectionMutex.Unlock()
+		}()
 	}
-	ss.PipeThenClose(remote, conn)
+	flow := ss.PipeThenClose(remote, conn)
+	lastConnectionMutex.Lock()
+	lastConnectionMutex.flowDownStats[port] = lastConnectionMutex.flowDownStats[port] + int64(flow)
+	lastConnectionMutex.Unlock()
+
 	closed = true
 	return
 }
@@ -195,6 +215,8 @@ func (pm *PasswdManager) add(port, password string, listener net.Listener) {
 	pm.Unlock()
 	lastConnectionMutex.Lock()
 	lastConnectionMutex.mtime[port] = time.Now().Unix()
+	lastConnectionMutex.flowUpStats[port] = 0
+	lastConnectionMutex.flowDownStats[port] = 0
 	lastConnectionMutex.Unlock()
 }
 
@@ -216,6 +238,8 @@ func (pm *PasswdManager) del(port string) {
 	pm.Unlock()
 	lastConnectionMutex.Lock()
 	delete(lastConnectionMutex.mtime, port)
+	delete(lastConnectionMutex.flowUpStats, port)
+	delete(lastConnectionMutex.flowDownStats, port)
 	lastConnectionMutex.Unlock()
 }
 
@@ -312,7 +336,7 @@ func run(ln net.Listener, port, password string, auth bool) {
 			}
 		}
 
-		go handleConnection(ss.NewConn(conn, cipher.Copy()), auth)
+		go handleConnection(ss.NewConn(conn, cipher.Copy()), auth, port)
 		lastConnectionMutex.Lock()
 		lastConnectionMutex.mtime[port] = time.Now().Unix()
 		lastConnectionMutex.Unlock()
@@ -344,6 +368,13 @@ type portTime struct {
 	LastConnection int64 `json:"lastconnection"`
 }
 
+type portsStatus struct {
+	Port           int   `json:"port"`
+	LastConnection int64 `json:"lastconnection"`
+	FlowUp         int64 `json:"flowup"`
+	FlowDown       int64 `json:"flowdown"`
+}
+
 func statusServer(w http.ResponseWriter, req *http.Request) {
 	var tmpArray []portTime
 	var ret []byte
@@ -366,9 +397,35 @@ func statusServer(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintln(w, string(ret))
 }
 
+func portsServer(w http.ResponseWriter, req *http.Request) {
+	// statusServer V2
+	var tmpArray []portsStatus
+	var ret []byte
+	lastConnectionMutex.RLock()
+	for k, v := range lastConnectionMutex.mtime {
+		var tmpPortsStatus portsStatus
+		tmpPort, err := strconv.Atoi(k)
+		if err != nil || tmpPort == 0 {
+			continue
+		}
+		tmpPortsStatus.Port = tmpPort
+		tmpPortsStatus.LastConnection = v
+		tmpPortsStatus.FlowUp = lastConnectionMutex.flowUpStats[k]
+		tmpPortsStatus.FlowDown = lastConnectionMutex.flowDownStats[k]
+		tmpArray = append(tmpArray, tmpPortsStatus)
+	}
+	lastConnectionMutex.RUnlock()
+	ret, err := json.Marshal(tmpArray)
+	if err != nil || string(ret) == "null" {
+		ret = []byte("[]")
+	}
+	fmt.Fprintln(w, string(ret))
+}
+
 func statusHTTPWorker() {
 	// password manager status
 	http.HandleFunc("/pwstatus", statusServer)
+	http.HandleFunc("/portsstatus", portsServer)
 	_err := http.ListenAndServe("localhost:3001", nil)
 	if _err != nil {
 		log.Fatal("ListenAndServe: ", _err.Error())
